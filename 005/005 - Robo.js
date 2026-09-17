@@ -6,91 +6,22 @@ if (!gl) {
 }
 
 // --------------------------------------------------
-// 1. VÉRTICES E CORES
-// --------------------------------------------------
-
-// Retângulo centrado na origem [-w/2, +w/2] x [-h/2, +h/2]
-function criarRetangulo(largura, altura) {
-    const w2 = largura / 2;
-    const h2 = altura / 2;
-    return new Float32Array([
-        -w2, -h2,
-         w2, -h2,
-         w2,  h2,
-        -w2, -h2,
-         w2,  h2,
-        -w2,  h2
-    ]);
-}
-
-// Retângulo cujo pivô fica no topo (y vai de -altura até 0)
-// Ideal para braços e pernas rotacionarem no ponto de articulação superior (ombro / quadril)
-function criarMembro(largura, altura) {
-    const w2 = largura / 2;
-    return new Float32Array([
-        -w2, -altura,
-         w2, -altura,
-         w2,  0.0,
-        -w2, -altura,
-         w2,  0.0,
-        -w2,  0.0
-    ]);
-}
-
-// Geometrias das partes do robô
-const verticesCorpo = criarRetangulo(0.6, 0.6);        // Largura 0.6, Altura 0.6
-const verticesCabeca = criarRetangulo(0.4, 0.35);      // Largura 0.4, Altura 0.35
-const verticesBraco = criarMembro(0.15, 0.4);          // Membro de 0.15 x 0.4 articulado no topo
-const verticesPerna = criarMembro(0.15, 0.3);          // Membro de 0.15 x 0.3 articulado no topo
-
-const verticesHaste = new Float32Array([
-    0.0, 0.0,
-    0.0, 0.15
-]);
-
-const verticesPonto = new Float32Array([
-    0.0, 0.0
-]);
-
-// Cores das partes (RGB)
-const corCorpo = new Float32Array([0.2, 0.5, 0.9]);         // Azul
-const corCabeca = new Float32Array([0.7, 0.7, 0.8]);        // Prata
-const corBracoEsq = new Float32Array([0.2, 0.8, 0.9]);      // Ciano
-const corBracoDir = new Float32Array([0.2, 0.8, 0.9]);      // Ciano
-const corPernaEsq = new Float32Array([0.3, 0.3, 0.4]);      // Cinza Escuro
-const corPernaDir = new Float32Array([0.3, 0.3, 0.4]);      // Cinza Escuro
-const corAmarelo = new Float32Array([1.0, 0.8, 0.2]);       // Amarelo (Antena)
-const corVermelho = new Float32Array([1.0, 0.2, 0.2]);      // Vermelho (Olhos)
-
-
-// --------------------------------------------------
-// 2. BUFFERS
-// --------------------------------------------------
-
-const verticesBuffer = gl.createBuffer();
-
-
-// --------------------------------------------------
-// 3. VERTEX SHADER
+// SHADERS GLSL ES 3.00 (Com u_viewTransform e u_modelTransform)
 // --------------------------------------------------
 
 const vertexShaderSource = `#version 300 es
 
 in vec2 aPosition;
 
-uniform mat3 u_transform;
+uniform mat3 u_viewTransform;
+uniform mat3 u_modelTransform;
 
 void main() {
-    vec3 position = u_transform * vec3(aPosition, 1.0);
+    vec3 position = u_viewTransform * u_modelTransform * vec3(aPosition, 1.0);
     gl_Position = vec4(position.xy, 0.0, 1.0);
     gl_PointSize = 12.0;
 }
 `;
-
-
-// --------------------------------------------------
-// 4. FRAGMENT SHADER
-// --------------------------------------------------
 
 const fragmentShaderSource = `#version 300 es
 
@@ -105,11 +36,6 @@ void main() {
 }
 `;
 
-
-// --------------------------------------------------
-// 5. COMPILAR SHADERS
-// --------------------------------------------------
-
 function createShader(gl, type, source) {
     const shader = gl.createShader(type);
     gl.shaderSource(shader, source);
@@ -120,139 +46,342 @@ function createShader(gl, type, source) {
         gl.deleteShader(shader);
         throw new Error(error);
     }
+
     return shader;
 }
 
-const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
-const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
+function createProgram(gl, vertexShaderSource, fragmentShaderSource) {
+    const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+    const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
+
+    const program = gl.createProgram();
+    gl.attachShader(program, vertexShader);
+    gl.attachShader(program, fragmentShader);
+    gl.linkProgram(program);
+
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(gl.getProgramInfoLog(program));
+    }
+
+    return program;
+}
+
+const program = createProgram(gl, vertexShaderSource, fragmentShaderSource);
 
 
-// --------------------------------------------------
-// 6. CRIAR PROGRAMA
-// --------------------------------------------------
+// ==================================================
+// CLASSE RENDERER (Padrão Professora)
+// ==================================================
 
-const program = gl.createProgram();
+class Renderer {
+    constructor(gl, program) {
+        this.gl = gl;
+        this.program = program;
 
-gl.attachShader(program, vertexShader);
-gl.attachShader(program, fragmentShader);
+        this.positionLocation = gl.getAttribLocation(program, "aPosition");
+        this.colorLocation = gl.getUniformLocation(program, "uColor");
+        this.viewTransformLocation = gl.getUniformLocation(program, "u_viewTransform");
+        this.modelTransformLocation = gl.getUniformLocation(program, "u_modelTransform");
 
-gl.linkProgram(program);
+        this.viewTransform = m3.identity();
+        this.verticesBuffer = gl.createBuffer();
+    }
 
-if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    throw new Error(gl.getProgramInfoLog(program));
+    defineViewTransform(viewTransform) {
+        this.viewTransform = viewTransform;
+    }
+
+    draw(object) {
+        const gl = this.gl;
+
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.verticesBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, object.vertices, gl.DYNAMIC_DRAW);
+
+        gl.enableVertexAttribArray(this.positionLocation);
+        gl.vertexAttribPointer(this.positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+        gl.uniform3fv(this.colorLocation, object.color);
+        gl.uniformMatrix3fv(this.modelTransformLocation, false, object.modelTransform);
+        gl.uniformMatrix3fv(this.viewTransformLocation, false, this.viewTransform);
+
+        gl.drawArrays(object.drawMode, 0, object.vertices.length / 2);
+    }
 }
 
 
-// --------------------------------------------------
-// 7. LOCAL DOS ATRIBUTOS E UNIFORMS
-// --------------------------------------------------
+// ==================================================
+// FUNÇÕES AUXILIARES DE GEOMETRIA (Retângulos e Partes)
+// ==================================================
 
-const positionLocation = gl.getAttribLocation(program, "aPosition");
-const colorLocation = gl.getUniformLocation(program, "uColor");
-const transformLocation = gl.getUniformLocation(program, "u_transform");
+// Retângulo centrado em (0, 0)
+function retanguloCentradoVertices(largura, altura) {
+    const w2 = largura / 2;
+    const h2 = altura / 2;
+    return new Float32Array([
+        -w2, -h2,
+         w2,  h2,
+        -w2,  h2,
+
+        -w2, -h2,
+         w2, -h2,
+         w2,  h2
+    ]);
+}
+
+// Membro articulado no topo (o pivô y fica em 0.0, e se estende para baixo até -altura)
+function membroArticuladoVertices(largura, altura) {
+    const w2 = largura / 2;
+    return new Float32Array([
+        -w2, -altura,
+         w2,  0.0,
+        -w2,  0.0,
+
+        -w2, -altura,
+         w2, -altura,
+         w2,  0.0
+    ]);
+}
 
 
-// --------------------------------------------------
-// 8. CONFIGURAR ATRIBUTOS
-// --------------------------------------------------
+// ==================================================
+// CLASSE BASE SCENE OBJECT
+// ==================================================
 
-gl.bindBuffer(gl.ARRAY_BUFFER, verticesBuffer);
-gl.enableVertexAttribArray(positionLocation);
-gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+class SceneObject {
+    constructor(vertices, color, drawMode = gl.TRIANGLES) {
+        this.vertices = vertices;
+        this.color = color;
+        this.drawMode = drawMode;
+        this.modelTransform = m3.identity();
+    }
+
+    updateModelTransform(modelTransform) {
+        this.modelTransform = modelTransform;
+    }
+}
 
 
-// --------------------------------------------------
-// 9. LIMPAR TELA E FUNÇÕES DE DESENHO AUXILIARES
-// --------------------------------------------------
+// ==================================================
+// CLASSES DOS COMPONENTES DO ROBÔ
+// ==================================================
+
+// Corpo
+class RobotBody extends SceneObject {
+    constructor() {
+        super(
+            retanguloCentradoVertices(0.6, 0.6),
+            new Float32Array([0.2, 0.5, 0.9]) // Azul
+        );
+    }
+}
+
+// Cabeça
+class RobotHead extends SceneObject {
+    constructor() {
+        super(
+            retanguloCentradoVertices(0.4, 0.35),
+            new Float32Array([0.7, 0.7, 0.8]) // Prata
+        );
+    }
+}
+
+// Haste da Antena
+class RobotAntennaStem extends SceneObject {
+    constructor() {
+        super(
+            new Float32Array([0.0, 0.0, 0.0, 0.15]),
+            new Float32Array([1.0, 0.8, 0.2]), // Amarelo
+            gl.LINES
+        );
+    }
+}
+
+// Ponto (Olhos e Topo da Antena)
+class RobotPoint extends SceneObject {
+    constructor(color) {
+        super(
+            new Float32Array([0.0, 0.0]),
+            color,
+            gl.POINTS
+        );
+    }
+}
+
+// Braço (Pivô no ombro)
+class RobotArm extends SceneObject {
+    constructor() {
+        super(
+            membroArticuladoVertices(0.15, 0.4),
+            new Float32Array([0.2, 0.8, 0.9]) // Ciano
+        );
+    }
+}
+
+// Perna (Pivô no quadril)
+class RobotLeg extends SceneObject {
+    constructor() {
+        super(
+            membroArticuladoVertices(0.15, 0.3),
+            new Float32Array([0.3, 0.3, 0.4]) // Cinza Escuro
+        );
+    }
+}
+
+
+// ==================================================
+// CLASSE ROBOT (Composto e Animado)
+// ==================================================
+
+class Robot {
+    constructor(tx = 0.0, ty = 0.0) {
+        this.tx = tx;
+        this.ty = ty;
+        this.time = 0.0;
+
+        // Partes componentes
+        this.body = new RobotBody();
+        this.head = new RobotHead();
+        this.antennaStem = new RobotAntennaStem();
+        this.antennaTop = new RobotPoint(new Float32Array([1.0, 0.8, 0.2]));
+        this.leftEye = new RobotPoint(new Float32Array([1.0, 0.2, 0.2]));
+        this.rightEye = new RobotPoint(new Float32Array([1.0, 0.2, 0.2]));
+
+        this.leftArm = new RobotArm();
+        this.rightArm = new RobotArm();
+
+        this.leftLeg = new RobotLeg();
+        this.rightLeg = new RobotLeg();
+    }
+
+    move() {
+        this.time += 0.04;
+
+        // 1. Movimentação do Robô (Global): Desloca horizontalmente e flutua nos passos
+        const roboGlobalX = this.tx + Math.sin(this.time * 0.5) * 0.35;
+        const roboGlobalY = this.ty + Math.abs(Math.sin(this.time * 2.0)) * 0.04;
+        const robotTransform = m3.translation(roboGlobalX, roboGlobalY);
+
+        // 2. CORPO (Centrado em y = -0.1 em relação ao robô)
+        const bodyTransform = m3.translate(robotTransform, 0.0, -0.1);
+        this.body.updateModelTransform(bodyTransform);
+
+        // 3. CABEÇA: Balanço/rotação própria
+        const headAngle = Math.sin(this.time * 1.5) * 0.12;
+        let headTransform = m3.translate(robotTransform, 0.0, 0.425);
+        headTransform = m3.rotate(headTransform, headAngle);
+        this.head.updateModelTransform(headTransform);
+
+        // Antena (Haste e Topo ligados à cabeça)
+        const antennaStemTransform = m3.translate(headTransform, 0.0, 0.175);
+        this.antennaStem.updateModelTransform(antennaStemTransform);
+
+        const antennaTopTransform = m3.translate(antennaStemTransform, 0.0, 0.15);
+        this.antennaTop.updateModelTransform(antennaTopTransform);
+
+        // Olhos (Ligados à cabeça)
+        const leftEyeTransform = m3.translate(headTransform, -0.08, 0.025);
+        this.leftEye.updateModelTransform(leftEyeTransform);
+
+        const rightEyeTransform = m3.translate(headTransform, 0.08, 0.025);
+        this.rightEye.updateModelTransform(rightEyeTransform);
+
+        // 4. BRAÇOS: Rotação oscilatória no ombro (frequência 1.8)
+        const armAngle = Math.sin(this.time * 1.8) * 0.6;
+
+        let leftArmTransform = m3.translate(robotTransform, -0.375, 0.1);
+        leftArmTransform = m3.rotate(leftArmTransform, armAngle);
+        this.leftArm.updateModelTransform(leftArmTransform);
+
+        let rightArmTransform = m3.translate(robotTransform, 0.375, 0.1);
+        rightArmTransform = m3.rotate(rightArmTransform, -armAngle);
+        this.rightArm.updateModelTransform(rightArmTransform);
+
+        // 5. PERNAS: Movimento alternado em oposição de fase nos quadris
+        const legAngle = Math.sin(this.time * 1.8) * 0.45;
+
+        let leftLegTransform = m3.translate(robotTransform, -0.175, -0.4);
+        leftLegTransform = m3.rotate(leftLegTransform, -legAngle);
+        this.leftLeg.updateModelTransform(leftLegTransform);
+
+        let rightLegTransform = m3.translate(robotTransform, 0.175, -0.4);
+        rightLegTransform = m3.rotate(rightLegTransform, legAngle);
+        this.rightLeg.updateModelTransform(rightLegTransform);
+    }
+
+    draw(renderer) {
+        // Desenha membros inferiores/posteriores
+        renderer.draw(this.leftLeg);
+        renderer.draw(this.rightLeg);
+
+        // Desenha tronco
+        renderer.draw(this.body);
+
+        // Desenha membros superiores
+        renderer.draw(this.leftArm);
+        renderer.draw(this.rightArm);
+
+        // Desenha cabeça e detalhes
+        renderer.draw(this.head);
+        renderer.draw(this.antennaStem);
+        renderer.draw(this.antennaTop);
+        renderer.draw(this.leftEye);
+        renderer.draw(this.rightEye);
+    }
+}
+
+
+// ==================================================
+// CLASSE SCENE (Gerencia loop, renderer e objetos)
+// ==================================================
+
+class Scene {
+    constructor(gl, program) {
+        this.gl = gl;
+        this.program = program;
+
+        this.renderer = new Renderer(gl, program);
+
+        // Janela de visualização (coordenadas de mundo de [-1.2, -1.2] a [1.2, 1.2])
+        this.viewTransform = m3.setClippingWindow(-1.2, -1.2, 1.2, 1.2);
+        this.renderer.defineViewTransform(this.viewTransform);
+
+        this.robot = new Robot(0.0, 0.0);
+    }
+
+    update() {
+        this.robot.move();
+    }
+
+    draw() {
+        this.gl.clear(this.gl.COLOR_BUFFER_BIT);
+        this.gl.useProgram(this.program);
+
+        this.robot.draw(this.renderer);
+    }
+
+    execute() {
+        this.update();
+        this.draw();
+        requestAnimationFrame(() => this.execute());
+    }
+
+    init() {
+        requestAnimationFrame(() => this.execute());
+    }
+}
+
+
+// ==================================================
+// CONFIGURAÇÃO INICIAL DO WEBGL
+// ==================================================
 
 gl.clearColor(0.1, 0.1, 0.1, 1.0);
-
-function desenharObjeto(vertices, modoDesenho, numVertices, cor, matrizTransform) {
-    gl.bindBuffer(gl.ARRAY_BUFFER, verticesBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.DYNAMIC_DRAW);
-
-    gl.uniform3fv(colorLocation, cor);
-    gl.uniformMatrix3fv(transformLocation, false, matrizTransform);
-
-    gl.drawArrays(modoDesenho, 0, numVertices);
-}
+gl.viewport(0, 0, canvas.width, canvas.height);
 
 
-// --------------------------------------------------
-// 10. ANIMAÇÃO E DESENHO
-// --------------------------------------------------
+// ==================================================
+// INICIAR CENA
+// ==================================================
 
-let tempo = 0;
-
-function drawScene() {
-    tempo += 0.04;
-
-    gl.clear(gl.COLOR_BUFFER_BIT);
-    gl.useProgram(program);
-
-    // 1. Movimento global do Robô (desloca horizontalmente e flutua levemente)
-    const roboX = Math.sin(tempo * 0.5) * 0.35;
-    const roboY = Math.abs(Math.sin(tempo * 2.0)) * 0.04;
-    const matrizRobo = m3.translation(roboX, roboY);
-
-    // 2. CORPO (Centrado no referencial do robô em (0.0, -0.1))
-    const matrizCorpo = m3.translate(matrizRobo, 0.0, -0.1);
-    desenharObjeto(verticesCorpo, gl.TRIANGLES, 6, corCorpo, matrizCorpo);
-
-    // 3. CABEÇA (Fica em cima do corpo e balança/gira levemente de forma autônoma)
-    const anguloCabeca = Math.sin(tempo * 1.5) * 0.12; // balanço da cabeça
-    let matrizCabeca = m3.translate(matrizRobo, 0.0, 0.425);
-    matrizCabeca = m3.rotate(matrizCabeca, anguloCabeca);
-    desenharObjeto(verticesCabeca, gl.TRIANGLES, 6, corCabeca, matrizCabeca);
-
-    // Detalhes da Cabeça (seguem a matriz da cabeça)
-    // Haste da Antena
-    const matrizHaste = m3.translate(matrizCabeca, 0.0, 0.175);
-    desenharObjeto(verticesHaste, gl.LINES, 2, corAmarelo, matrizHaste);
-
-    // Topo da Antena
-    const matrizTopo = m3.translate(matrizHaste, 0.0, 0.15);
-    desenharObjeto(verticesPonto, gl.POINTS, 1, corAmarelo, matrizTopo);
-
-    // Olhos
-    const matrizOlhoEsq = m3.translate(matrizCabeca, -0.08, 0.025);
-    desenharObjeto(verticesPonto, gl.POINTS, 1, corVermelho, matrizOlhoEsq);
-
-    const matrizOlhoDir = m3.translate(matrizCabeca, 0.08, 0.025);
-    desenharObjeto(verticesPonto, gl.POINTS, 1, corVermelho, matrizOlhoDir);
-
-    // 4. BRAÇOS (Movimento oscilatório de caminhada / balanço nos ombros)
-    // Ângulos alternados para os braços (frequência 1.8)
-    const anguloBracoEsq = Math.sin(tempo * 1.8) * 0.6;
-    const anguloBracoDir = -Math.sin(tempo * 1.8) * 0.6;
-
-    // Braço Esquerdo (Ombro em (-0.375, 0.1))
-    let matrizBracoEsq = m3.translate(matrizRobo, -0.375, 0.1);
-    matrizBracoEsq = m3.rotate(matrizBracoEsq, anguloBracoEsq);
-    desenharObjeto(verticesBraco, gl.TRIANGLES, 6, corBracoEsq, matrizBracoEsq);
-
-    // Braço Direito (Ombro em (0.375, 0.1))
-    let matrizBracoDir = m3.translate(matrizRobo, 0.375, 0.1);
-    matrizBracoDir = m3.rotate(matrizBracoDir, anguloBracoDir);
-    desenharObjeto(verticesBraco, gl.TRIANGLES, 6, corBracoDir, matrizBracoDir);
-
-    // 5. PERNAS (Movimento alternado de caminhada na bacia, com frequência e fase diferentes)
-    // Pernas balançam em oposição aos braços para marcha realista
-    const anguloPernaEsq = -Math.sin(tempo * 1.8) * 0.45;
-    const anguloPernaDir = Math.sin(tempo * 1.8) * 0.45;
-
-    // Perna Esquerda (Quadril em (-0.175, -0.4))
-    let matrizPernaEsq = m3.translate(matrizRobo, -0.175, -0.4);
-    matrizPernaEsq = m3.rotate(matrizPernaEsq, anguloPernaEsq);
-    desenharObjeto(verticesPerna, gl.TRIANGLES, 6, corPernaEsq, matrizPernaEsq);
-
-    // Perna Direita (Quadril em (0.175, -0.4))
-    let matrizPernaDir = m3.translate(matrizRobo, 0.175, -0.4);
-    matrizPernaDir = m3.rotate(matrizPernaDir, anguloPernaDir);
-    desenharObjeto(verticesPerna, gl.TRIANGLES, 6, corPernaDir, matrizPernaDir);
-
-    requestAnimationFrame(drawScene);
-}
-
-// Inicia o ciclo de animação
-drawScene();
+const scene = new Scene(gl, program);
+scene.init();
